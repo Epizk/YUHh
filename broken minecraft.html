@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Minecraft MVP with Detailed Noise Stone and Fixed Collisions</title>
+
+    <style>
+
+        body { margin: 0; font-family: sans-serif; color: white; cursor: default; }
+
+        canvas { display: block; }
+
+        /* The cursor is hidden when the pointer is locked, but we keep the crosshair */
+
+        #crosshair {
+
+            position: absolute;
+
+            top: 50%;
+
+            left: 50%;
+
+            width: 2px;
+
+            height: 2px;
+
+            background-color: white;
+
+            transform: translate(-50%, -50%);
+
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+
+            pointer-events: none;
+
+        }
+
+        #block-selector {
+
+            position: absolute;
+
+            bottom: 20px;
+
+            left: 50%;
+
+            transform: translateX(-50%);
+
+            padding: 10px 20px;
+
+            background: rgba(0, 0, 0, 0.5);
+
+            border-radius: 5px;
+
+            font-size: 1.2em;
+
+            pointer-events: none;
+
+            display: flex;
+
+            gap: 15px;
+
+        }
+
+        .block-option {
+
+            padding: 5px 10px;
+
+            border: 2px solid transparent;
+
+            cursor: default;
+
+        }
+
+        .block-option.selected {
+
+            border: 2px solid yellow;
+
+            background: rgba(255, 255, 0, 0.1);
+
+            border-radius: 3px;
+
+        }
+
+        /* Add an instruction to start the game */
+
+        #info {
+
+            position: absolute;
+
+            top: 0;
+
+            left: 0;
+
+            width: 100%;
+
+            padding: 10px;
+
+            text-align: center;
+
+            background: rgba(0, 0, 0, 0.5);
+
+            font-size: 1.1em;
+
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+    <div id="crosshair"></div>
+
+    <div id="info">Click anywhere to lock the mouse and start playing (Esc to unlock).</div>
+
+    <div id="block-selector">
+
+        <div id="block-1" class="block-option selected">1: Grass</div>
+
+        <div id="block-2" class="block-option">2: Stone</div>
+
+        <div id="block-3" class="block-option">3: Dirt</div> 
+
+    </div>
+
+    <script type="importmap">
+
+        { "imports": { "three": "https://unpkg.com/three@0.165.0/build/three.module.js" } }
+
+    </script>
+
+    <script type="module">
+
+        import * as THREE from 'three';
+
+
+
+        // --- Core Setup ---
+
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        const renderer = new THREE.WebGLRenderer();
+
+        renderer.setSize(window.innerWidth, window.innerHeight);
+
+        document.body.appendChild(renderer.domElement);
+
+
+
+        // Prevent the right-click context menu (CRITICAL for right-click interaction)
+
+        renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+
+
+        // Minimal lighting
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+
+        scene.add(ambientLight);
+
+
+
+        // Procedural sky (shader remains the same)
+
+        const skyGeometry = new THREE.SphereGeometry(500, 32, 32);
+
+        const skyMaterial = new THREE.ShaderMaterial({
+
+            uniforms: {
+
+                topColor: { value: new THREE.Color(0x87ceeb) },
+
+                bottomColor: { value: new THREE.Color(0xffffff) },
+
+                offset: { value: 33 },
+
+                exponent: { value: 0.6 }
+
+            },
+
+            vertexShader: `
+
+                varying vec3 vWorldPosition;
+
+                void main() {
+
+                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+
+                    vWorldPosition = worldPosition.xyz;
+
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+
+                }
+
+            `,
+
+            fragmentShader: `
+
+                uniform vec3 topColor;
+
+                uniform vec3 bottomColor;
+
+                uniform float offset;
+
+                uniform float exponent;
+
+                varying vec3 vWorldPosition;
+
+                void main() {
+
+                    float h = normalize(vWorldPosition + offset).y;
+
+                    gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), exponent), 0.0)), 1.0);
+
+                }
+
+            `,
+
+            side: THREE.BackSide
+
+        });
+
+        const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+
+        scene.add(sky);
+
+
+
+        // --- Block Data & Setup ---
+
+        const blocks = [];
+
+        let nextBlockId = 0;
+
+        const textureLoader = new THREE.TextureLoader();
+
+        
+
+        // Textures
+
+        const grassTexture = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/minecraft/grass.png');
+
+        const dirtTexture = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/minecraft/dirt.png'); 
+
+
+
+        // Materials
+
+        const grassMaterial = new THREE.MeshStandardMaterial({ map: grassTexture });
+
+        const dirtMaterial = new THREE.MeshStandardMaterial({ map: dirtTexture });
+
+        
+
+        // --- NEW: Stone Material with Detailed Noise Shader ---
+
+        const stoneMaterial = new THREE.ShaderMaterial({
+
+            uniforms: {
+
+                baseColor: { value: new THREE.Color(0x707070) }, // Slightly darker base gray
+
+                noiseScale: { value: 1.0 }, // Frequency of the noise pattern
+
+                colorIntensity: { value: 0.2 } // How much the noise affects the color
+
+            },
+
+            vertexShader: `
+
+                varying vec3 vPosition;
+
+                void main() {
+
+                    vPosition = position;
+
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+
+                }
+
+            `,
+
+            fragmentShader: `
+
+                uniform vec3 baseColor;
+
+                uniform float noiseScale;
+
+                uniform float colorIntensity;
+
+                varying vec3 vPosition;
+
+
+
+                // Hash function for pseudo-random number generation
+
+                float hash(vec2 p) {
+
+                    float h = dot(p, vec2(127.1, 311.7));
+
+                    return fract(sin(h) * 43758.5453123);
+
+                }
+
+
+
+                // Simple 2D Perlin Noise implementation (value noise)
+
+                float noise(vec2 p) {
+
+                    vec2 i = floor(p);
+
+                    vec2 f = fract(p);
+
+                    
+
+                    float a = hash(i);
+
+                    float b = hash(i + vec2(1.0, 0.0));
+
+                    float c = hash(i + vec2(0.0, 1.0));
+
+                    float d = hash(i + vec2(1.0, 1.0));
+
+
+
+                    vec2 u = f * f * (3.0 - 2.0 * f); // Smoothstep curve
+
+                    
+
+                    // Bilinear interpolation
+
+                    return mix(a, b, u.x) + 
+
+                           (c - a) * u.y * (1.0 - u.x) + 
+
+                           (d - b) * u.x * u.y;
+
+                }
+
+
+
+                void main() {
+
+                    // Sample noise based on the block's world position (vPosition)
+
+                    float noiseValue = noise(vPosition.xz * noiseScale);
+
+                    
+
+                    // Layering the noise for a more detailed look (Octaves)
+
+                    float totalNoise = noiseValue * 0.5;
+
+                    totalNoise += noise(vPosition.xz * noiseScale * 2.0) * 0.25; // Higher frequency
+
+                    totalNoise += noise(vPosition.xz * noiseScale * 4.0) * 0.125; // Even higher frequency
+
+                    
+
+                    // Clamp and normalize noise
+
+                    totalNoise = totalNoise * 2.0 - 0.5;
+
+                    
+
+                    // Apply noise to color
+
+                    float factor = 1.0 + totalNoise * colorIntensity;
+
+                    vec3 finalColor = baseColor * factor;
+
+                    
+
+                    gl_FragColor = vec4(finalColor, 1.0);
+
+                }
+
+            `
+
+        });
+
+
+
+        const availableBlocks = {
+
+            '1': { name: 'Grass', material: grassMaterial, elementId: 'block-1' },
+
+            '2': { name: 'Stone', material: stoneMaterial, elementId: 'block-2' },
+
+            '3': { name: 'Dirt', material: dirtMaterial, elementId: 'block-3' }
+
+        };
+
+        let selectedBlockKey = '1';
+
+
+
+        function updateBlockSelectorUI() {
+
+            Object.keys(availableBlocks).forEach(key => {
+
+                const element = document.getElementById(availableBlocks[key].elementId);
+
+                if (element) {
+
+                    if (key === selectedBlockKey) {
+
+                        element.classList.add('selected');
+
+                    } else {
+
+                        element.classList.remove('selected');
+
+                    }
+
+                }
+
+            });
+
+        }
+
+        updateBlockSelectorUI();
+
+
+
+        function createCube(x, y, z, material) {
+
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+
+            const cube = new THREE.Mesh(geometry, material);
+
+            cube.position.set(x, y, z);
+
+            cube.userData.id = nextBlockId++;
+
+            cube.userData.collidable = true; 
+
+            scene.add(cube);
+
+            blocks.push(cube);
+
+        }
+
+
+
+        const terrainSize = 40; 
+
+        for (let x = -terrainSize; x <= terrainSize; x++) {
+
+            for (let z = -terrainSize; z <= terrainSize; z++) {
+
+                createCube(x, -0.5, z, grassMaterial);
+
+            }
+
+        }
+
+
+
+        // --- Player and Controls ---
+
+        const playerObject = new THREE.Object3D();
+
+        scene.add(playerObject);
+
+        playerObject.add(camera);
+
+        const playerHeight = 1.6; // Player eye level
+
+        playerObject.position.y = playerHeight; 
+
+
+
+        const moveSpeed = 0.05;
+
+        const rotationSpeed = 0.002;
+
+        const keys = { w: false, a: false, s: false, d: false, ' ': false };
+
+
+
+        let jumpVelocity = 0;
+
+        const gravity = -0.01;
+
+        const jumpPower = 0.15;
+
+
+
+        // Raycasting for interactions (center) and collision (downwards)
+
+        const raycaster = new THREE.Raycaster();
+
+        const center = new THREE.Vector2(0, 0);
+
+        const downVector = new THREE.Vector3(0, -1, 0); 
+
+        const groundDistance = 0.1; // Distance from player's feet (Y-1.6) to check for ground
+
+        const interactionDistance = 5; 
+
+
+
+        // --- Pointer Lock API Implementation (omitted for brevity, assume unchanged) ---
+
+        let controlsEnabled = false;
+
+        const infoElement = document.getElementById('info');
+
+
+
+        document.addEventListener('click', () => {
+
+            if (!controlsEnabled) {
+
+                renderer.domElement.requestPointerLock();
+
+            }
+
+        });
+
+
+
+        document.addEventListener('pointerlockchange', () => {
+
+            controlsEnabled = (document.pointerLockElement === renderer.domElement);
+
+            infoElement.style.display = controlsEnabled ? 'none' : 'block';
+
+        });
+
+
+
+        // --- Keyboard and Mouse Input (omitted for brevity, assume interaction logic is correct) ---
+
+        document.addEventListener('keydown', (e) => {
+
+            const key = e.key.toLowerCase();
+
+            if (controlsEnabled) {
+
+                if (keys.hasOwnProperty(key)) {
+
+                    keys[key] = true;
+
+                }
+
+                if (e.key === ' ' && jumpVelocity === 0) { 
+
+                    jumpVelocity = jumpPower;
+
+                }
+
+                
+
+                if (availableBlocks.hasOwnProperty(e.key)) {
+
+                    selectedBlockKey = e.key;
+
+                    updateBlockSelectorUI();
+
+                }
+
+            }
+
+        });
+
+
+
+        document.addEventListener('keyup', (e) => {
+
+            const key = e.key.toLowerCase();
+
+            if (keys.hasOwnProperty(key)) {
+
+                keys[key] = false;
+
+            }
+
+        });
+
+
+
+        document.addEventListener('mousemove', (e) => {
+
+            if (controlsEnabled) {
+
+                const deltaX = e.movementX;
+
+                const deltaY = e.movementY;
+
+
+
+                playerObject.rotation.y -= deltaX * rotationSpeed;
+
+                
+
+                camera.rotation.x -= deltaY * rotationSpeed;
+
+                camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+
+            }
+
+        });
+
+
+
+        document.addEventListener('mousedown', (e) => {
+
+            if (controlsEnabled) {
+
+                raycaster.setFromCamera(center, camera);
+
+                raycaster.far = interactionDistance;
+
+                const intersects = raycaster.intersectObjects(blocks);
+
+                
+
+                if (intersects.length > 0) {
+
+                    handleBlockInteraction(e.button, intersects[0]); 
+
+                }
+
+            }
+
+        });
+
+
+
+        function handleBlockInteraction(button, intersect) {
+
+            const intersectedBlock = intersect.object;
+
+            
+
+            // Left Mouse Button (0): Break a block
+
+            if (button === 0) {
+
+                scene.remove(intersectedBlock);
+
+                const index = blocks.findIndex(block => block.userData.id === intersectedBlock.userData.id);
+
+                if (index > -1) {
+
+                    blocks.splice(index, 1);
+
+                }
+
+            }
+
+
+
+            // Right Mouse Button (2): Place a block
+
+            if (button === 2) {
+
+                const newPosition = intersectedBlock.position.clone().add(intersect.face.normal);
+
+                const selectedMaterial = availableBlocks[selectedBlockKey].material;
+
+
+
+                // --- FIXED Block Placement Collision Check ---
+
+                
+
+                const playerBlockX = Math.round(playerObject.position.x);
+
+                const playerBlockZ = Math.round(playerObject.position.z);
+
+                
+
+                // Camera Y is player's eyes. Feet block is 1 unit below camera's block Y.
+
+                const playerHeadY = Math.floor(playerObject.position.y); 
+
+                const playerFeetY = Math.floor(playerObject.position.y - 1); 
+
+                
+
+                const newBlockX = Math.round(newPosition.x);
+
+                const newBlockY = Math.round(newPosition.y);
+
+                const newBlockZ = Math.round(newPosition.z);
+
+
+
+                // 1. Check for existing block at new position
+
+                const isSpaceOccupied = blocks.some(block => 
+
+                    Math.round(block.position.x) === newBlockX &&
+
+                    Math.round(block.position.y) === newBlockY &&
+
+                    Math.round(block.position.z) === newBlockZ
+
+                );
+
+
+
+                // 2. Check if the new block would collide with the player's 2x1 space
+
+                const isCollisionWithPlayer = (
+
+                    newBlockX === playerBlockX && 
+
+                    newBlockZ === playerBlockZ &&
+
+                    (newBlockY === playerFeetY || newBlockY === playerHeadY)
+
+                );
+
+
+
+                if (!isSpaceOccupied && !isCollisionWithPlayer) {
+
+                    const materialToUse = (selectedBlockKey === '2') ? stoneMaterial : selectedMaterial;
+
+                    createCube(newPosition.x, newPosition.y, newPosition.z, materialToUse);
+
+                }
+
+            }
+
+        }
+
+
+
+        // --- FIXED Ground Collision ---
+
+        function checkGroundCollision() {
+
+            // Ray starts from player's feet (position.y - playerHeight) and goes down
+
+            // The position is playerObject.position.y (camera/eye level)
+
+            const playerFeetPosition = playerObject.position.clone();
+
+            playerFeetPosition.y -= playerHeight; // Move ray starting point down to the base of the player model
+
+
+
+            raycaster.set(playerFeetPosition, downVector);
+
+            raycaster.far = groundDistance; 
+
+            
+
+            const collidableBlocks = blocks.filter(b => b.userData.collidable);
+
+            const intersects = raycaster.intersectObjects(collidableBlocks);
+
+            
+
+            if (intersects.length > 0) {
+
+                const ground = intersects[0];
+
+                
+
+                // If the block is intersected (i.e., we are on/in the ground)
+
+                if (ground.distance <= 0) {
+
+                    // Set player position so their feet are exactly on the block top (Y+0.5)
+
+                    playerObject.position.y = ground.object.position.y + 0.5 + playerHeight;
+
+                    jumpVelocity = 0;
+
+                }
+
+                
+
+                return true;
+
+            } else {
+
+                return false;
+
+            }
+
+        }
+
+
+
+        function animate() {
+
+            requestAnimationFrame(animate);
+
+
+
+            if (controlsEnabled) {
+
+                // Movement logic
+
+                const forward = new THREE.Vector3(0, 0, -1);
+
+                const right = new THREE.Vector3(1, 0, 0);
+
+
+
+                forward.applyQuaternion(playerObject.quaternion);
+
+                right.applyQuaternion(playerObject.quaternion);
+
+
+
+                forward.y = 0;
+
+                forward.normalize();
+
+                right.y = 0;
+
+                right.normalize();
+
+
+
+                if (keys.w) {
+
+                    playerObject.position.add(forward.multiplyScalar(moveSpeed));
+
+                }
+
+                if (keys.s) {
+
+                    playerObject.position.add(forward.multiplyScalar(-moveSpeed));
+
+                }
+
+                if (keys.a) {
+
+                    playerObject.position.add(right.multiplyScalar(-moveSpeed));
+
+                }
+
+                if (keys.d) {
+
+                    playerObject.position.add(right.multiplyScalar(moveSpeed));
+
+                }
+
+
+
+                // Apply gravity
+
+                playerObject.position.y += jumpVelocity;
+
+                jumpVelocity += gravity;
+
+
+
+                // Ground Collision Check
+
+                const onGround = checkGroundCollision();
+
+
+
+                if (jumpVelocity <= 0 && !onGround) {
+
+                     // Start falling only if not already falling fast or jumping up
+
+                     if (jumpVelocity === 0) {
+
+                        jumpVelocity = gravity;
+
+                     }
+
+                }
+
+                
+
+                // Simple 'bottomless pit' reset (prevents infinite fall)
+
+                if (playerObject.position.y < -50) {
+
+                     playerObject.position.set(0, playerHeight, 0);
+
+                     jumpVelocity = 0;
+
+                }
+
+            }
+
+
+
+            renderer.render(scene, camera);
+
+        }
+
+
+
+        animate();
+
+
+
+        window.addEventListener('resize', () => {
+
+            camera.aspect = window.innerWidth / window.innerHeight;
+
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+        });
+
+    </script>
+
+</body>
+
+</html>
